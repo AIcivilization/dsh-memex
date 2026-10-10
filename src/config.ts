@@ -18,6 +18,8 @@ export interface MemexConfig {
   model?: string
   /** Character budget of the activity digest sent to the model. */
   maxSummaryInputChars: number
+  /** Output token budget for the summary; reasoning models spend part of it thinking. */
+  maxSummaryOutputTokens: number
   /** Language the summary is written in. */
   language: string
 }
@@ -32,5 +34,6 @@ export const Config: Schema<MemexConfig> = Schema.object({
   provider: Schema.string().description('LLM provider route for the summary'),
   model: Schema.string().description('LLM model id for the summary'),
   maxSummaryInputChars: Schema.natural().default(24000).description('Digest size sent to the model'),
+  maxSummaryOutputTokens: Schema.natural().default(16000).description('Summary output token budget (includes reasoning)'),
   language: Schema.string().default('中文').description('Summary language'),
 }) as Schema<MemexConfig>

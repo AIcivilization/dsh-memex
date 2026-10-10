@@ -1,0 +1,5 @@
+# dsh bundle patch: inserts dsh-memex into a profile's layer stack.
+# Override any field (outputDir, writeAt, summarize, provider/model, ...) in your profile's cordis.patch.yml.
+- insert:
+    - id: dsh-memex
+      name: dsh-memex

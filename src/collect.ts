@@ -1,34 +1,36 @@
 /**
  * Collect one local day of dsh activity from `ctx.sessionQuery`.
  *
- * Only the structural subset of the session-query service this plugin reads
- * is declared here, so the plugin builds without dsh's internal packages.
- * Event documents carry first-party semantic text (see dsh
- * `session-query/src/extraction.ts`): user/assistant text, `tool/call` as
- * `name\narguments`, `todo/write` as `status\ncontent` pairs, `turn/end` as
- * `error\nmessage` for failed turns.
+ * Only the structural subset of the session-query service and of the raw
+ * session events this plugin reads is declared here, so the plugin builds
+ * without dsh's internal packages. Raw events (not search documents) are read
+ * so that context injected by plugins (`source.kind !== 'user'`) and tool-call
+ * blocks inside assistant messages stay out of the diary.
  */
 
 export interface SessionRecordLike {
   header: { id: string; createdAt: number; cwd?: string; origin?: string; parentSession?: string }
 }
 
-export interface EventDocLike {
+export interface RawEventLike {
   seq: number
   type: string
   time: number
-  text: string
+  data?: unknown
+}
+
+export interface ModelRoute {
+  provider: string
+  model: string
 }
 
 export interface SessionQueryLike {
   listSessions(signal?: AbortSignal): Promise<SessionRecordLike[]>
-  filterEvents(sessionId: string, filters: readonly unknown[]): Promise<EventDocLike[]>
+  readSession(sessionId: string): Promise<{ events: RawEventLike[] }>
   readTitleSnapshots(ids: readonly string[], signal?: AbortSignal): Promise<Array<
     | { sessionId: string; status: 'fulfilled'; value: { title?: { title?: unknown } } }
     | { sessionId: string; status: 'rejected'; reason: unknown }
   >>
-  listEvents(sessionId: string): Promise<Array<{ seq: number; type: string; time: number }>>
-  readEvent(request: { sessionId: string; seq: number; before?: number; after?: number }): Promise<{ target: { data?: unknown } }>
 }
 
 export interface TodoItem {
@@ -51,6 +53,8 @@ export interface SessionActivity {
   commands: string[]
   errors: string[]
   todos: TodoItem[]
+  /** Model route of the session's last in-day request. */
+  route?: ModelRoute
 }
 
 export interface DayActivity {
@@ -113,18 +117,30 @@ export function readToolArguments(raw: string): { files: string[]; commands: str
   return { files, commands }
 }
 
-/** Fold one session's in-day event documents into an activity record. */
+type Block = { type?: unknown; text?: unknown }
+
+/** Text blocks only: reasoning, tool calls and attachments are not diary material. */
+function textOf(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  return (content as Block[])
+    .filter(block => block?.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text as string)
+    .join('\n')
+    .trim()
+}
+
+/** Fold one session's in-day raw events into an activity record. */
 export function foldSession(
   record: SessionRecordLike,
-  docs: readonly EventDocLike[],
+  events: readonly RawEventLike[],
 ): SessionActivity | undefined {
-  if (docs.length === 0) return undefined
+  if (events.length === 0) return undefined
   const activity: SessionActivity = {
     id: record.header.id,
     ...record.header.cwd !== undefined ? { cwd: record.header.cwd } : {},
     subagent: record.header.origin === 'subagent',
-    firstAt: docs[0]!.time,
-    lastAt: docs[docs.length - 1]!.time,
+    firstAt: events[0]!.time,
+    lastAt: events[events.length - 1]!.time,
     prompts: [],
     toolCounts: {},
     files: [],
@@ -132,36 +148,49 @@ export function foldSession(
     errors: [],
     todos: [],
   }
-  for (const doc of docs) {
-    switch (doc.type) {
-      case 'user/message':
-        if (doc.text !== '') activity.prompts.push(clip(doc.text, 300))
+  for (const event of events) {
+    const data = (event.data ?? {}) as Record<string, any>
+    switch (event.type) {
+      case 'user/message': {
+        // Plugin-injected context (time samples, mode banners, model-change notes) has a non-user source.
+        const kind = data.source?.kind
+        if (kind !== undefined && kind !== 'user') break
+        const text = textOf(data.content)
+        if (text !== '') activity.prompts.push(clip(text, 300))
         break
-      case 'assistant/message':
-        if (doc.text !== '') activity.lastReply = clip(doc.text, 600)
+      }
+      case 'assistant/message': {
+        const text = textOf(data.message?.content)
+        if (text !== '') activity.lastReply = clip(text, 600)
         break
+      }
       case 'tool/call': {
-        const newline = doc.text.indexOf('\n')
-        const name = newline === -1 ? doc.text : doc.text.slice(0, newline)
-        if (name === '') break
-        activity.toolCounts[name] = (activity.toolCounts[name] ?? 0) + 1
-        const { files, commands } = readToolArguments(newline === -1 ? '' : doc.text.slice(newline + 1))
+        if (typeof data.name !== 'string' || data.name === '') break
+        activity.toolCounts[data.name] = (activity.toolCounts[data.name] ?? 0) + 1
+        const { files, commands } = readToolArguments(typeof data.arguments === 'string' ? data.arguments : '')
         for (const file of files) pushUnique(activity.files, file, 200)
         for (const command of commands) pushUnique(activity.commands, clip(command, 160), 100)
         break
       }
-      case 'todo/write': {
-        const lines = doc.text.split('\n')
-        const todos: TodoItem[] = []
-        for (let i = 0; i + 1 < lines.length; i += 2) {
-          todos.push({ status: lines[i]!, content: clip(lines[i + 1]!, 200) })
+      case 'todo/write':
+        if (Array.isArray(data.todos)) {
+          activity.todos = (data.todos as Array<{ status?: unknown; content?: unknown }>)
+            .filter(todo => typeof todo?.content === 'string')
+            .map(todo => ({ status: String(todo.status ?? ''), content: clip(todo.content as string, 200) }))
         }
-        activity.todos = todos
+        break
+      case 'turn/end':
+        if (data.reason?.kind === 'error' && typeof data.reason.error?.message === 'string') {
+          pushUnique(activity.errors, clip(data.reason.error.message, 300), 20)
+        }
+        break
+      case 'request/header': {
+        const config = data.header?.config
+        if (typeof config?.provider === 'string' && typeof config.model === 'string') {
+          activity.route = { provider: config.provider, model: config.model }
+        }
         break
       }
-      case 'turn/end':
-        if (doc.text.startsWith('error')) pushUnique(activity.errors, clip(doc.text.slice(5), 300), 20)
-        break
       default:
         break
     }
@@ -190,14 +219,14 @@ export async function collectDay(
 
   const sessions: SessionActivity[] = []
   for (const record of records) {
-    let docs: EventDocLike[]
+    let events: RawEventLike[]
     try {
-      docs = await query.filterEvents(record.header.id, [{ kind: 'time', from: start, to: end }])
+      events = (await query.readSession(record.header.id)).events
     } catch (error) {
       options.onSkip?.(record.header.id, error)
       continue
     }
-    const activity = foldSession(record, docs)
+    const activity = foldSession(record, events.filter(event => event.time >= start && event.time <= end))
     if (activity !== undefined) sessions.push(activity)
   }
 
@@ -215,19 +244,3 @@ export async function collectDay(
   return { date, start, end, sessions }
 }
 
-/**
- * Model route (`provider` + `model`) of the last request `sessionId` sent,
- * read from its latest `request/header` event.
- */
-export async function latestRoute(
-  query: SessionQueryLike,
-  sessionId: string,
-): Promise<{ provider: string; model: string } | undefined> {
-  const records = await query.listEvents(sessionId)
-  const header = [...records].reverse().find(record => record.type === 'request/header')
-  if (header === undefined) return undefined
-  const { target } = await query.readEvent({ sessionId, seq: header.seq, before: 0, after: 0 })
-  const config = (target.data as { header?: { config?: { provider?: unknown; model?: unknown } } } | undefined)?.header?.config
-  if (typeof config?.provider !== 'string' || typeof config.model !== 'string') return undefined
-  return { provider: config.provider, model: config.model }
-}

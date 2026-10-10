@@ -14,7 +14,7 @@ import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { collectDay, dayBounds, latestRoute, type SessionQueryLike } from './collect.js'
+import { collectDay, dayBounds, type SessionQueryLike } from './collect.js'
 import { Config, type MemexConfig } from './config.js'
 import { renderDiary, renderDigest } from './render.js'
 import { summarizeDay, type LlmLike } from './summarize.js'
@@ -74,29 +74,28 @@ export function apply(ctx: Context, config: MemexConfig): void {
     })
   })
 
-  async function summary(day: Awaited<ReturnType<typeof collectDay>>): Promise<string | undefined> {
-    if (!config.summarize || llm === undefined || day.sessions.length === 0) return undefined
-    let route = config.provider !== undefined && config.model !== undefined
+  /** Model summary, or the reason it is missing so the diary itself shows why. */
+  async function summary(day: Awaited<ReturnType<typeof collectDay>>): Promise<{ text?: string; note?: string }> {
+    if (!config.summarize || day.sessions.length === 0) return {}
+    if (llm === undefined) return { note: 'dsh 的 LLM 服务不可用' }
+    const configured = config.provider !== undefined && config.model !== undefined
       ? { provider: config.provider, model: config.model }
       : undefined
-    if (route === undefined) {
-      const latest = [...day.sessions].sort((a, b) => b.lastAt - a.lastAt)[0]!
-      route = await latestRoute(query, latest.id).catch(() => undefined)
-    }
-    if (route === undefined) {
-      ctx.logger.warn('dsh-memex: no model route for summary; set provider and model in config')
-      return undefined
-    }
+    const route = configured ?? [...day.sessions].sort((a, b) => b.lastAt - a.lastAt).find(s => s.route !== undefined)?.route
+    if (route === undefined) return { note: '找不到可用的模型，请在配置里设置 provider 和 model' }
     try {
-      return await summarizeDay(llm, {
-        ...route,
-        language: config.language,
-        date: day.date,
-        digest: renderDigest(day, config.maxSummaryInputChars),
-      })
+      return {
+        text: await summarizeDay(llm, {
+          ...route,
+          language: config.language,
+          date: day.date,
+          digest: renderDigest(day, config.maxSummaryInputChars),
+          maxTokens: config.maxSummaryOutputTokens,
+        }),
+      }
     } catch (error) {
       ctx.logger.warn(`dsh-memex: summary failed, writing factual log only (${(error as Error).message})`)
-      return undefined
+      return { note: `${route.provider}/${route.model}：${(error as Error).message}` }
     }
   }
 
@@ -108,7 +107,8 @@ export function apply(ctx: Context, config: MemexConfig): void {
       onSkip: (id, error) => ctx.logger.warn(`dsh-memex: skipped session ${id} (${(error as Error).message})`),
     })
     if (skipEmpty && day.sessions.length === 0) return undefined
-    const markdown = renderDiary(day, await summary(day), new Date())
+    const { text, note } = await summary(day)
+    const markdown = renderDiary(day, text, new Date(), note)
     await mkdir(outputDir, { recursive: true })
     const path = join(outputDir, `${day.date}.md`)
     await writeFile(path, markdown, 'utf8')

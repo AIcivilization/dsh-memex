@@ -14,31 +14,33 @@ function fakeQuery(): SessionQueryLike {
     { header: { id: 's-sub', createdAt: at(10), origin: 'subagent' } },
     { header: { id: 's-yesterday', createdAt: at(-20) } },
   ]
-  const events: Record<string, Array<{ seq: number; type: string; time: number; text: string }>> = {
+  const user = (text: string, kind = 'user') => ({ content: [{ type: 'text', text }], source: { kind } })
+  const events: Record<string, Array<{ seq: number; type: string; time: number; data: unknown }>> = {
     's-a': [
-      { seq: 1, type: 'user/message', time: at(9, 5), text: '修复 vps 安装脚本' },
-      { seq: 2, type: 'tool/call', time: at(9, 6), text: 'read\n{"path":"install.sh"}' },
-      { seq: 3, type: 'tool/call', time: at(9, 7), text: 'bash\n{"command":"bash install.sh --dry-run"}' },
-      { seq: 4, type: 'tool/call', time: at(9, 8), text: 'edit\n{"file_path":"install.sh"}' },
-      { seq: 5, type: 'todo/write', time: at(9, 9), text: 'completed\n修复权限\npending\n补测试' },
-      { seq: 6, type: 'turn/end', time: at(9, 10), text: 'error\nrate limited' },
-      { seq: 7, type: 'assistant/message', time: at(9, 20), text: '已修复安装脚本。' },
+      { seq: 0, type: 'request/header', time: at(9, 4), data: { header: { config: { provider: 'deepseek', model: 'flash' } } } },
+      { seq: 1, type: 'user/message', time: at(9, 5), data: user('修复 vps 安装脚本') },
+      { seq: 2, type: 'user/message', time: at(9, 5), data: user('Time sampled while preparing turn 2', 'plugin') },
+      { seq: 3, type: 'tool/call', time: at(9, 6), data: { name: 'read', arguments: '{"path":"install.sh"}' } },
+      { seq: 4, type: 'tool/call', time: at(9, 7), data: { name: 'bash', arguments: '{"command":"bash install.sh --dry-run"}' } },
+      { seq: 5, type: 'tool/call', time: at(9, 8), data: { name: 'edit', arguments: '{"file_path":"install.sh"}' } },
+      { seq: 6, type: 'todo/write', time: at(9, 9), data: { todos: [{ status: 'completed', content: '修复权限' }, { status: 'pending', content: '补测试' }] } },
+      { seq: 7, type: 'turn/end', time: at(9, 10), data: { reason: { kind: 'error', error: { message: 'rate limited' } } } },
+      { seq: 8, type: 'assistant/message', time: at(9, 20), data: { message: { content: [
+        { type: 'reasoning', text: 'thinking' },
+        { type: 'text', text: '已修复安装脚本。' },
+        { type: 'tool-call', name: 'vps_exec', arguments: '{}' },
+      ] } } },
     ],
     's-yesterday': [
-      { seq: 1, type: 'user/message', time: at(-5), text: 'old' },
+      { seq: 0, type: 'user/message', time: at(-5), data: user('old') },
     ],
   }
   return {
     async listSessions() { return sessions },
-    async filterEvents(id, filters) {
-      const range = filters[0] as { from: number; to: number }
-      return (events[id] ?? []).filter(e => e.time >= range.from && e.time <= range.to)
-    },
+    async readSession(id) { return { events: events[id] ?? [] } },
     async readTitleSnapshots(ids) {
       return ids.map(id => ({ sessionId: id, status: 'fulfilled' as const, value: { title: { title: 'VPS 安装修复' } } }))
     },
-    async listEvents() { return [] },
-    async readEvent() { return { target: {} } },
   }
 }
 
@@ -55,11 +57,13 @@ describe('collectDay', () => {
     expect(s!.todos).toEqual([{ status: 'completed', content: '修复权限' }, { status: 'pending', content: '补测试' }])
     expect(s!.errors).toEqual(['rate limited'])
     expect(s!.lastReply).toBe('已修复安装脚本。')
+    expect(s!.prompts).toEqual(['修复 vps 安装脚本'])
+    expect(s!.route).toEqual({ provider: 'deepseek', model: 'flash' })
   })
 
   it('skips sessions whose reads fail', async () => {
     const query = fakeQuery()
-    query.filterEvents = async () => { throw new Error('corrupt') }
+    query.readSession = async () => { throw new Error('corrupt') }
     const skipped: string[] = []
     const result = await collectDay(query, day, { scanWindowDays: 30, includeSubagents: false, onSkip: id => skipped.push(id) })
     expect(result.sessions).toEqual([])
@@ -77,6 +81,7 @@ describe('render', () => {
     expect(md).toContain('- [ ] 补测试')
     expect(md).toContain('`/Users/wf/dsh/dsh-vps`')
     expect(renderDiary({ ...result, sessions: [] }, undefined, day)).toContain('今天 dsh 没有活动')
+    expect(renderDiary(result, undefined, day, 'x/y：max-tokens')).toContain('> 今日总结未生成：x/y：max-tokens')
     expect(renderDigest(result, 40)).toMatch(/…\(truncated\)$/)
   })
 })

@@ -48,6 +48,7 @@ dsh-memex:
   summarize: true         # 让模型写「今日总结」；失败时只写事实部分
   # provider: deepseek    # 不填就沿用当天最后一个会话用的模型
   # model: deepseek-chat
+  maxSummaryOutputTokens: 16000  # 推理模型的思考也占这个额度
   language: 中文
 ```
 

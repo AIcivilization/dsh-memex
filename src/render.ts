@@ -33,8 +33,8 @@ function totals(day: DayActivity): { prompts: number; toolCalls: number; files: 
   return { prompts, toolCalls, files: files.size, projects: [...projects] }
 }
 
-/** Render the diary file. `summary` is the optional model-written narrative. */
-export function renderDiary(day: DayActivity, summary: string | undefined, generatedAt: Date): string {
+/** Render the diary file. `summary` is the optional model-written narrative; `summaryNote` says why it is missing. */
+export function renderDiary(day: DayActivity, summary: string | undefined, generatedAt: Date, summaryNote?: string): string {
   const t = totals(day)
   const lines: string[] = [
     `# Memex · ${day.date}`,
@@ -50,6 +50,8 @@ export function renderDiary(day: DayActivity, summary: string | undefined, gener
 
   if (summary !== undefined && summary.trim() !== '') {
     lines.push('## 今日总结', '', summary.trim(), '')
+  } else if (summaryNote !== undefined) {
+    lines.push(`> 今日总结未生成：${summaryNote}`, '')
   }
 
   if (t.projects.length > 0) {

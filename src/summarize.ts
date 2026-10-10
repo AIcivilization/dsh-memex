@@ -19,6 +19,7 @@ export interface SummaryRequest {
   language: string
   date: string
   digest: string
+  maxTokens: number
   signal?: AbortSignal
 }
 
@@ -44,7 +45,7 @@ export async function summarizeDay(llm: LlmLike, request: SummaryRequest): Promi
     model: request.model,
     system: systemPrompt(request.language),
     messages: [message],
-    maxTokens: 2000,
+    maxTokens: request.maxTokens,
     ...request.signal !== undefined ? { signal: request.signal } : {},
   })) {
     if (chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
